@@ -3,7 +3,7 @@ import json
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from langdetect import detect, DetectorFactory
+from langdetect import detect, DetectorFactory, lang_detect_exception
 from googletrans import Translator
 
 DetectorFactory.seed = 0  # Ensure reproducibility
@@ -21,18 +21,24 @@ def fetch_data(url):
         return None
 
 def filter_factchecks(data, keyword):
-    # Filter the data to get fact-checks related to a specific keyword (e.g., India)
+    # Filter the data to get fact-checks related to a specific keyword and ensure they are in English
     filtered_factchecks = []
-    for item in data.get("dataFeedElement", []):
-        item_str = json.dumps(item).lower()
-        if keyword.lower() in item_str:
-            filtered_factchecks.append(item)
+    for element in data.get("dataFeedElement", []):
+        if "item" in element and element["item"] is not None:
+            item = element["item"][0]
+            claim_text = item.get("claimReviewed", "")
+            item_str = json.dumps(item).lower()
+            if keyword.lower() in item_str and detect_language(claim_text) == 'en':
+                filtered_factchecks.append(element)
     return filtered_factchecks
 
 def detect_language(text):
     try:
-        return detect(text)
-    except:
+        if text.strip():
+            return detect(text)
+        else:
+            return 'unknown'
+    except lang_detect_exception.LangDetectException:
         return 'unknown'
 
 def translate_to_hindi(text):
@@ -45,12 +51,10 @@ def translate_to_hindi(text):
         return text
 
 def get_most_recent_factchecks(factchecks, count=10):
-    # Sort the fact-checks by date and get the most recent ones
     sorted_factchecks = sorted(factchecks, key=lambda x: x.get('dateCreated', ''), reverse=True)
     return sorted_factchecks[:count]
 
 def get_claim_source(url):
-    # Determine the claim source based on the URL
     if "twitter.com" in url:
         return "Twitter"
     elif "facebook.com" in url:
@@ -63,7 +67,6 @@ def get_claim_source(url):
         return "Other"
 
 def get_rating_color(rating):
-    # Determine the text color based on the rating
     if rating.lower() in ["false", "misleading", "incorrect", "mostly false"]:
         return "red"
     elif rating.lower() in ["true", "mostly true"]:
@@ -72,9 +75,8 @@ def get_rating_color(rating):
         return "black"
 
 def format_factchecks(factchecks):
-    # Format the fact-checks in a regular, non-tabular way
     formatted_factchecks = []
-    for factcheck in factchecks:
+    for index, factcheck in enumerate(factchecks, start=1):
         claim_review = factcheck["item"][0]
         claim = claim_review.get("claimReviewed", "N/A")
         rating = claim_review.get("reviewRating", {}).get("alternateName", "N/A").capitalize()
@@ -84,17 +86,16 @@ def format_factchecks(factchecks):
         claim_source = get_claim_source(claim_url).title()
         rating_color = get_rating_color(rating)
         
-        # Translate claim and rating to Hindi if the claim is not in Hindi
-        if detect_language(claim) != 'hi':
-            claim_hindi = translate_to_hindi(claim)
-            rating_hindi = translate_to_hindi(rating)
-            claim = f"{claim} (Translated: {claim_hindi})"
-            rating = f"{rating} (Translated: {rating_hindi})"
-        
+        # Translate claim and rating to Hindi
+        claim_hindi = translate_to_hindi(claim)
+        rating_hindi = translate_to_hindi(rating)
+
         formatted_factcheck = (
             f"<p>"
-            f"<strong>Claim:</strong> {claim}<br>"
+            f"<strong>{index}. Claim:</strong> {claim}<br>"
+            f"<strong>Hindi Translation:</strong> {claim_hindi}<br>"
             f"<strong>Rating:</strong> <span style='color: {rating_color};'>{rating}</span><br>"
+            f"<strong>Hindi Translation:</strong> {rating_hindi}<br>"
             f"<strong>Source:</strong> {source}<br>"
             f"<strong>Claim URL:</strong> <a href='{claim_url}'>Link</a><br>"
             f"<strong>Factcheck URL:</strong> <a href='{factcheck_url}'>Link</a><br>"
@@ -107,19 +108,15 @@ def format_factchecks(factchecks):
 
 
 def send_email(subject, body, bcc_emails, from_email, from_password):
-    # Set up the SMTP server
     smtp_server = 'smtp.gmail.com'
     smtp_port = 587
-
-    # Send individual emails to each BCC recipient
     for bcc_email in bcc_emails:
         msg = MIMEMultipart()
         msg['From'] = from_email
-        msg['To'] = ''  # Leave the TO field empty
+        msg['To'] = ''
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'html'))
-        msg['Bcc'] = bcc_email  # Set BCC to the current recipient
-
+        msg['Bcc'] = bcc_email
         try:
             server = smtplib.SMTP(smtp_server, smtp_port)
             server.starttls()
@@ -130,47 +127,15 @@ def send_email(subject, body, bcc_emails, from_email, from_password):
         except Exception as e:
             print(f"Failed to send email to {bcc_email}. Error: {e}")
 
-#def send_email(subject, body, bcc_emails, from_email, from_password):
-#    # Set up the SMTP server
-#    smtp_server = 'smtp.gmail.com'
-#    smtp_port = 587
-
-    # Create the email
-#    msg = MIMEMultipart()
-#    msg['From'] = from_email
-#    msg['To'] = ''
-#    msg['Subject'] = subject
-#    msg.attach(MIMEText(body, 'html'))
-
-    # Add Bcc recipients
-#    msg['Bcc'] = ', '.join(bcc_emails)
-    # Send the email
-#    try:
-#        server = smtplib.SMTP(smtp_server, smtp_port)
-#        server.starttls()
-#        server.login(from_email, from_password)
-#        server.sendmail(from_email, bcc_emails, msg.as_string())
-#        server.quit()
-#        print("Email sent successfully")
-#    except Exception as e:
-#        print(f"Failed to send email. Error: {e}")
-
 def main():
-    # Fetch the data
     data = fetch_data(url)
     if not data:
         return
 
-    # Filter the fact-checks related to India
     india_factchecks = filter_factchecks(data, "India")
-
-    # Get the most recent fact-checks
     recent_factchecks = get_most_recent_factchecks(india_factchecks)
-
-    # Format the most recent fact-checks
     formatted_factchecks = format_factchecks(recent_factchecks)
     email_body = "".join(formatted_factchecks)
-
     # Email details
     subject = "Recent Fact-Checks Related to India"
     bcc_emails = []
